@@ -1,0 +1,79 @@
+BÁO CÁO MÔ PHỎNG CRASH
+=======================
+
+Lệnh chạy: python src/main.py --simulate-crash
+Mục đích: tạo dirty logs và dirty database giống như hệ thống phân tán bị crash trong quá trình chạy 2PC.
+
+Mô hình mô phỏng
+----------------
+1. Bắt đầu từ data/initial_db.json.
+2. Mô phỏng các transaction phân tán trên SITE1, SITE2 và SITE3.
+3. Ghi các bản ghi START, UPDATE, PREPARE, COMMIT và ABORT vào log của từng site.
+4. Cố tình dừng một số transaction trước bản ghi kết thúc để mô phỏng dirty log sau crash.
+5. Replay các bản ghi UPDATE vào data/dirty_db.json để mô phỏng dirty pages sau crash.
+6. Recovery manager đọc các file này và tạo output/clean_db.json, output/recovery_report.txt và output/clean_logs/.
+
+Các tình huống crash được tạo
+---------------------
+
+T1 - Transaction phân tán thành công bình thường
+  Điểm crash: Cả ba participant ghi START, UPDATE, PREPARE và COMMIT trước khi crash.
+  Kết quả mong đợi: REDO vì mọi site đã đạt COMMIT.
+
+T2 - Một participant ABORT sau PREPARE
+  Điểm crash: SITE2 ghi ABORT sau PREPARE, còn SITE1 và SITE3 chưa có quyết định kết thúc vì crash làm gián đoạn quá trình lan truyền quyết định.
+  Kết quả mong đợi: UNDO vì một quyết định/vote abort sẽ ngăn global commit trong 2PC.
+
+T3 - Trường hợp blocking kinh điển của 2PC
+  Điểm crash: Tất cả site đã PREPARE/READY, nhưng crash xảy ra trước khi có bản ghi COMMIT hoặc ABORT toàn cục.
+  Kết quả mong đợi: trong 2PC thuần là UNCERTAIN; project này dùng timeout-abort policy nên áp dụng UNDO để tạo trạng thái sạch.
+
+T4 - Participant mất bản ghi COMMIT cuối
+  Điểm crash: SITE1 và SITE2 đã ghi COMMIT, nhưng SITE3 crash ngay sau PREPARE nên bị thiếu thông điệp/bản ghi COMMIT cuối.
+  Kết quả mong đợi: REDO và bổ sung COMMIT vào clean log của SITE3.
+
+T5 - Crash trước PREPARE
+  Điểm crash: Transaction đã START và cập nhật một phần dữ liệu, nhưng chưa participant nào đạt PREPARE.
+  Kết quả mong đợi: UNDO vì transaction chưa bao giờ sẵn sàng commit.
+
+T6 - Coordinator đã commit trong khi participant vẫn READY
+  Điểm crash: SITE1 ghi COMMIT, sau đó SITE2 và SITE3 crash khi vẫn ở trạng thái READY.
+  Kết quả mong đợi: REDO và bổ sung COMMIT vào clean log của các participant.
+
+T7 - Participant ABORT sớm
+  Điểm crash: SITE2 ghi ABORT trước PREPARE; các site khác có công việc đang dở hoặc READY.
+  Kết quả mong đợi: UNDO vì một vote/quyết định abort sẽ chặn global commit.
+
+T8 - Đã biết global commit nhưng hai participant thiếu COMMIT
+  Điểm crash: SITE1 ghi COMMIT, trong khi SITE2 và SITE3 crash sau PREPARE trước khi nhận/ghi COMMIT.
+  Kết quả mong đợi: REDO và bổ sung COMMIT vào clean log của SITE2 và SITE3.
+
+T9 - Trạng thái hỗn hợp ABORT-ACTIVE-READY
+  Điểm crash: SITE1 ghi ABORT, SITE2 chỉ ACTIVE, và SITE3 READY khi crash xảy ra.
+  Kết quả mong đợi: UNDO và sửa các log chưa hoàn chỉnh bằng ABORT.
+
+T10 - Transaction chỉ đọc/không có UPDATE
+  Điểm crash: Tất cả site commit, nhưng không có bản ghi UPDATE.
+  Kết quả mong đợi: quyết định REDO nhưng giá trị database không thay đổi.
+
+T11 - Transaction commit có nhiều UPDATE
+  Điểm crash: Nhiều site cập nhật dữ liệu và tất cả site commit trước crash.
+  Kết quả mong đợi: REDO theo thứ tự timestamp tăng dần.
+
+T12 - Chuỗi UPDATE bị ABORT
+  Điểm crash: Cùng một item được cập nhật nhiều lần qua các site, sau đó SITE3 ghi ABORT còn các site khác vẫn READY.
+  Kết quả mong đợi: UNDO theo thứ tự timestamp giảm dần để khôi phục giá trị ban đầu.
+
+T13 - Tình huống xung đột toàn cục không hợp lệ
+  Điểm crash: SITE1 ghi COMMIT trong khi SITE2 ghi ABORT cho cùng transaction; đây là lỗi cố ý để kiểm thử phát hiện vi phạm atomicity của 2PC.
+  Kết quả mong đợi: đánh dấu xung đột toàn cục, chọn UNDO an toàn và báo cáo vi phạm.
+
+Các file được tạo
+---------------
+- logs/site1.log
+- logs/site2.log
+- logs/site3.log
+- data/initial_db.json
+- data/dirty_db.json
+
+Báo cáo mô phỏng riêng này chứng minh dirty dataset không phải tạo ngẫu nhiên; mỗi log thiếu kết thúc đều gắn với một tình huống crash có chủ đích.
