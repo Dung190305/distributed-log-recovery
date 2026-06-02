@@ -149,12 +149,31 @@ class TransactionAnalyzer:
 
     def _find_repairs(self, states: Dict[str, SiteState], decision: GlobalDecision) -> Dict[str, str]:
         repairs: Dict[str, str] = {}
+
+        has_commit = SiteState.COMMITTED in states.values()
+        has_abort = SiteState.ABORTED in states.values()
+        is_global_conflict = has_commit and has_abort
+
         if decision == GlobalDecision.REDO:
             for site, state in states.items():
                 if state in {SiteState.ACTIVE, SiteState.READY, SiteState.NOT_FOUND}:
                     repairs[site] = "COMMIT"
+
         elif decision == GlobalDecision.UNDO:
             for site, state in states.items():
-                if state in {SiteState.ACTIVE, SiteState.READY, SiteState.NOT_FOUND}:
-                    repairs[site] = "ABORT"
+                if is_global_conflict:
+                    # Với conflict COMMIT/ABORT, chuẩn hóa clean log về ABORT.
+                    # Site đã COMMIT cũng cần được sửa thành ABORT trong clean log.
+                    if state in {
+                        SiteState.COMMITTED,
+                        SiteState.ACTIVE,
+                        SiteState.READY,
+                        SiteState.NOT_FOUND,
+                        SiteState.INVALID,
+                    }:
+                        repairs[site] = "ABORT"
+                else:
+                    if state in {SiteState.ACTIVE, SiteState.READY, SiteState.NOT_FOUND}:
+                        repairs[site] = "ABORT"
+
         return repairs

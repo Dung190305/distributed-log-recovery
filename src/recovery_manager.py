@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from log_parser import LogRecord, LogParser, group_by_transaction
-from transaction_analyzer import GlobalDecision, TransactionAnalysis, TransactionAnalyzer
+from transaction_analyzer import GlobalDecision, SiteState, TransactionAnalysis, TransactionAnalyzer
 
 
 class RecoveryManager:
@@ -143,13 +143,14 @@ class RecoveryManager:
 
         return trace
 
-    def _write_clean_logs(
-        self,
-        site_logs: Dict[str, List[LogRecord]],
-        analyses: List[TransactionAnalysis],
-    ) -> None:
-        analysis_by_tx = {a.transaction_id: a for a in analyses}
-        max_timestamp = max((r.timestamp for records in site_logs.values() for r in records), default=0)
+    def _write_clean_logs(self,
+    site_logs: Dict[str, List[LogRecord]],
+    analyses: List[TransactionAnalysis],
+) -> None:
+        max_timestamp = max(
+            (r.timestamp for records in site_logs.values() for r in records),
+            default=0,
+        )
         next_timestamp = max_timestamp + 1
 
         for site_id, records in site_logs.items():
@@ -159,7 +160,27 @@ class RecoveryManager:
             for analysis in analyses:
                 if analysis.transaction_id not in tx_ids_in_site:
                     continue
+
+                states = set(analysis.site_states.values())
+                is_global_conflict = (
+                    SiteState.COMMITTED in states
+                    and SiteState.ABORTED in states
+                    and analysis.decision == GlobalDecision.UNDO
+                )
+
                 repair_op = analysis.repaired_sites.get(site_id)
+
+                # Nếu là conflict COMMIT/ABORT và site hiện tại từng ghi COMMIT,
+                # clean log cần bỏ COMMIT cũ để chuẩn hóa về ABORT.
+                if is_global_conflict and repair_op == "ABORT":
+                    clean_records = [
+                        r for r in clean_records
+                        if not (
+                            r.transaction_id == analysis.transaction_id
+                            and r.operation == "COMMIT"
+                        )
+                    ]
+
                 if repair_op:
                     clean_records.append(
                         LogRecord(
@@ -173,10 +194,10 @@ class RecoveryManager:
 
             clean_records.sort(key=lambda r: r.timestamp)
             output_file = self.clean_logs_dir / f"{site_id.lower()}_clean.log"
+
             with output_file.open("w", encoding="utf-8") as f:
                 for record in clean_records:
                     f.write(record.to_log_line() + "\n")
-
     def _write_report(
         self,
         report_path: Path,

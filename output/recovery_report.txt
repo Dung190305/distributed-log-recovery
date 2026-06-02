@@ -56,6 +56,7 @@ Transaction T13
   Lý do: Phát hiện xung đột toàn cục: có site ghi COMMIT nhưng site khác ghi ABORT cho cùng một transaction. Điều này vi phạm tính atomic commitment của 2PC. Cách xử lý an toàn là UNDO và báo cáo lỗi xung đột.
   Liên hệ lý thuyết 2PC: Quy tắc atomicity của 2PC: một transaction phân tán chỉ được có một quyết định toàn cục, hoặc COMMIT ở tất cả site, hoặc ABORT ở tất cả site.
   Sửa clean log:
+    - SITE1: bổ sung ABORT
     - SITE3: bổ sung ABORT
 
 Transaction T2
