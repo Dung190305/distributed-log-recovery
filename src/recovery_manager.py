@@ -1,14 +1,54 @@
-from __future__ import annotations
-
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
-from log_parser import LogRecord, LogParser, group_by_transaction
-from transaction_analyzer import GlobalDecision, SiteState, TransactionAnalysis, TransactionAnalyzer
+from log_parser import LogParser, LogRecord
+from transaction_analyzer import (
+    GlobalDecision,
+    SiteState,
+    TransactionAnalysis,
+    TransactionAnalyzer,
+)
+
+
+@dataclass
+class RecoveryResult:
+    """
+    Kết quả sau khi chạy recovery.
+
+    analyses:
+        Danh sách kết quả phân tích từng transaction.
+
+    clean_db_path:
+        Đường dẫn file clean_db.json.
+
+    report_path:
+        Đường dẫn file recovery_report.txt.
+
+    clean_logs_dir:
+        Đường dẫn thư mục clean_logs.
+    """
+
+    analyses: List[TransactionAnalysis]
+    clean_db_path: Path
+    report_path: Path
+    clean_logs_dir: Path
 
 
 class RecoveryManager:
+    """
+    Quản lý toàn bộ quá trình phục hồi sau crash.
+
+    Luồng xử lý:
+    1. Đọc dirty logs của 3 site.
+    2. Phân tích transaction theo Two-Phase Commit.
+    3. Đọc dirty_db.json.
+    4. Tạo clean_db.json bằng KEEP/REDO/UNDO.
+    5. Tạo clean logs.
+    6. Tạo recovery_report.txt.
+    """
+
     def __init__(
         self,
         logs_dir: str | Path,
@@ -17,54 +57,149 @@ class RecoveryManager:
         coordinator_site: str = "SITE1",
         uncertain_policy: str = "abort",
     ) -> None:
+        """
+        Khởi tạo RecoveryManager.
+
+        logs_dir:
+            Thư mục chứa site1.log, site2.log, site3.log.
+
+        dirty_db_path:
+            File database bẩn sau crash.
+
+        output_dir:
+            Thư mục ghi output sau recovery.
+
+        coordinator_site:
+            Site coordinator giả lập, mặc định SITE1.
+
+        uncertain_policy:
+            Cách xử lý READY nhưng thiếu global decision.
+            - abort: đưa về UNDO.
+            - keep_uncertain: giữ UNCERTAIN.
+        """
+
         self.logs_dir = Path(logs_dir)
         self.dirty_db_path = Path(dirty_db_path)
         self.output_dir = Path(output_dir)
+
+        self.clean_db_path = self.output_dir / "clean_db.json"
+        self.report_path = self.output_dir / "recovery_report.txt"
         self.clean_logs_dir = self.output_dir / "clean_logs"
+
         self.parser = LogParser()
         self.analyzer = TransactionAnalyzer(
             coordinator_site=coordinator_site,
             uncertain_policy=uncertain_policy,
         )
 
-    def run(self) -> Dict[str, object]:
+    def run(self) -> RecoveryResult:
+        """
+        Chạy toàn bộ quá trình recovery.
+
+        Đây là hàm chính của RecoveryManager.
+        """
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.clean_logs_dir.mkdir(parents=True, exist_ok=True)
 
+        # 1. Đọc dirty logs của các site.
         site_logs = self.parser.parse_directory(self.logs_dir)
+
+        # 2. Phân tích transaction để lấy decision: KEEP/REDO/UNDO/UNCERTAIN.
         analyses = self.analyzer.analyze(site_logs)
+
+        # 3. Đọc dirty database.
         dirty_db = self._load_db(self.dirty_db_path)
-        clean_db = self._recover_database(dirty_db, site_logs, analyses)
 
-        clean_db_path = self.output_dir / "clean_db.json"
-        report_path = self.output_dir / "recovery_report.txt"
+        # 4. Tạo clean database bằng thuật toán recovery.
+        clean_db = self._recover_database(
+            dirty_db=dirty_db,
+            site_logs=site_logs,
+            analyses=analyses,
+        )
 
-        self._write_json(clean_db_path, clean_db)
-        self._write_clean_logs(site_logs, analyses)
-        self._write_report(report_path, site_logs, analyses, dirty_db, clean_db)
+        # 5. Ghi clean database.
+        self._write_json(self.clean_db_path, clean_db)
 
-        return {
-            "transactions": len(analyses),
-            "redo": [a.transaction_id for a in analyses if a.decision == GlobalDecision.REDO],
-            "undo": [a.transaction_id for a in analyses if a.decision == GlobalDecision.UNDO],
-            "uncertain": [a.transaction_id for a in analyses if a.decision == GlobalDecision.UNCERTAIN],
-            "clean_db_path": str(clean_db_path),
-            "report_path": str(report_path),
-            "clean_logs_dir": str(self.clean_logs_dir),
-        }
+        # 6. Ghi clean logs.
+        self._write_clean_logs(
+            site_logs=site_logs,
+            analyses=analyses,
+        )
+
+        # 7. Ghi recovery report.
+        self._write_report(
+            report_path=self.report_path,
+            site_logs=site_logs,
+            analyses=analyses,
+            dirty_db=dirty_db,
+            clean_db=clean_db,
+        )
+
+        return RecoveryResult(
+            analyses=analyses,
+            clean_db_path=self.clean_db_path,
+            report_path=self.report_path,
+            clean_logs_dir=self.clean_logs_dir,
+        )
 
     def _load_db(self, path: Path) -> Dict[str, int]:
+        """
+        Đọc database JSON từ file.
+
+        Ví dụ:
+        data/dirty_db.json
+        """
+
         if not path.exists():
             raise FileNotFoundError(f"Không tìm thấy file database: {path}")
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError("Database JSON must be an object, e.g. {\"A\": 100}")
-        return {str(k): int(v) for k, v in data.items()}
+
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        return data
 
     def _write_json(self, path: Path, data: Dict[str, int]) -> None:
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, sort_keys=True)
+        """
+        Ghi dictionary Python ra file JSON.
+        """
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(
+                data,
+                file,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+
+    def _collect_updates_by_transaction(
+        self,
+        site_logs: Dict[str, List[LogRecord]],
+    ) -> Dict[str, List[LogRecord]]:
+        """
+        Gom tất cả dòng UPDATE theo transaction_id.
+
+        Ví dụ:
+        {
+            "T1": [UPDATE A 100 150, UPDATE B 200 250],
+            "T2": [UPDATE D 400 450]
+        }
+        """
+
+        updates_by_transaction: Dict[str, List[LogRecord]] = {}
+
+        for records in site_logs.values():
+            for record in records:
+                if record.operation.upper() == "UPDATE":
+                    updates_by_transaction.setdefault(
+                        record.transaction_id,
+                        [],
+                    ).append(record)
+
+        return updates_by_transaction
 
     def _recover_database(
         self,
@@ -72,132 +207,199 @@ class RecoveryManager:
         site_logs: Dict[str, List[LogRecord]],
         analyses: List[TransactionAnalysis],
     ) -> Dict[str, int]:
-        db = dict(dirty_db)
-        grouped = group_by_transaction(site_logs)
-        decision_by_tx = {a.transaction_id: a.decision for a in analyses}
+        """
+        Tạo clean database từ dirty database dựa trên kết quả phân tích.
 
-        # Redo in chronological order, undo in reverse chronological order.
-        redo_records: List[LogRecord] = []
-        undo_records: List[LogRecord] = []
+        KEEP:
+            Transaction đã COMMIT đầy đủ ở tất cả site.
+            Đây là case hoàn hảo, không sửa database.
 
-        for tx_id, site_records in grouped.items():
-            updates = [r for records in site_records.values() for r in records if r.is_update]
-            if decision_by_tx[tx_id] == GlobalDecision.REDO:
-                redo_records.extend(updates)
-            elif decision_by_tx[tx_id] == GlobalDecision.UNDO:
-                undo_records.extend(updates)
+        REDO:
+            Transaction đã có global COMMIT nhưng còn site thiếu COMMIT.
+            Áp dụng after_value để đảm bảo dữ liệu commit được giữ.
 
-        for record in sorted(redo_records, key=lambda r: r.timestamp):
-            if record.item is not None and record.after_value is not None:
-                db[record.item] = record.after_value
+        UNDO:
+            Transaction ABORT, chưa hoàn tất hoặc conflict.
+            Khôi phục before_value để xóa ảnh hưởng của transaction.
 
-        for record in sorted(undo_records, key=lambda r: r.timestamp, reverse=True):
-            if record.item is not None and record.before_value is not None:
-                db[record.item] = record.before_value
+        UNCERTAIN:
+            Chưa có quyết định rõ ràng.
+            Không tự ý sửa database.
+        """
 
-        return db
+        clean_db = dict(dirty_db)
 
+        updates_by_transaction = self._collect_updates_by_transaction(site_logs)
 
-    def _build_operation_trace(
+        for analysis in analyses:
+            transaction_id = analysis.transaction_id
+            decision = analysis.decision
+            update_records = updates_by_transaction.get(transaction_id, [])
+
+            # 1. KEEP: transaction hoàn hảo, giữ nguyên database.
+            if decision == GlobalDecision.KEEP:
+                continue
+
+            # 2. REDO: dùng after_value, chạy theo timestamp tăng dần.
+            if decision == GlobalDecision.REDO:
+                redo_records = sorted(
+                    update_records,
+                    key=lambda record: record.timestamp,
+                )
+
+                for record in redo_records:
+                    if record.item is None or record.after_value is None:
+                        continue
+
+                    clean_db[record.item] = record.after_value
+
+            # 3. UNDO: dùng before_value, chạy ngược timestamp.
+            elif decision == GlobalDecision.UNDO:
+                undo_records = sorted(
+                    update_records,
+                    key=lambda record: record.timestamp,
+                    reverse=True,
+                )
+
+                for record in undo_records:
+                    if record.item is None or record.before_value is None:
+                        continue
+
+                    clean_db[record.item] = record.before_value
+
+            # 4. UNCERTAIN: không tự sửa database.
+            elif decision == GlobalDecision.UNCERTAIN:
+                continue
+
+        return clean_db
+
+    def _write_clean_logs(
         self,
         site_logs: Dict[str, List[LogRecord]],
         analyses: List[TransactionAnalysis],
-    ) -> Dict[str, Dict[str, List[str]]]:
-        """Build a human-readable REDO/UNDO trace for the recovery report.
-
-        REDO uses after_value and is shown in chronological order.
-        UNDO uses before_value and is shown in reverse chronological order,
-        which is important when one transaction updates the same item multiple times.
+    ) -> None:
         """
-        grouped = group_by_transaction(site_logs)
-        decision_by_tx = {a.transaction_id: a.decision for a in analyses}
+        Tạo clean logs sau recovery.
 
-        trace: Dict[str, Dict[str, List[str]]] = {"REDO": {}, "UNDO": {}}
+        KEEP:
+            Transaction đã COMMIT đầy đủ, không sửa log.
 
-        for tx_id in sorted(grouped.keys()):
-            site_records = grouped[tx_id]
-            updates = [
-                r
-                for records in site_records.values()
-                for r in records
-                if r.is_update
-            ]
+        REDO:
+            Site nào thiếu COMMIT sẽ được bổ sung COMMIT.
 
-            decision = decision_by_tx.get(tx_id)
-            if decision == GlobalDecision.REDO:
-                ordered_updates = sorted(updates, key=lambda r: r.timestamp)
-                trace["REDO"][tx_id] = [
-                    f"{r.site_id} {r.item}: {r.before_value} -> {r.after_value} "
-                    f"(áp dụng after_value, timestamp={r.timestamp})"
-                    for r in ordered_updates
-                    if r.item is not None
-                ]
-            elif decision == GlobalDecision.UNDO:
-                ordered_updates = sorted(updates, key=lambda r: r.timestamp, reverse=True)
-                trace["UNDO"][tx_id] = [
-                    f"{r.site_id} {r.item}: rollback {r.after_value} -> {r.before_value} "
-                    f"(khôi phục before_value, timestamp={r.timestamp})"
-                    for r in ordered_updates
-                    if r.item is not None
-                ]
+        UNDO:
+            Site nào thiếu ABORT sẽ được bổ sung ABORT.
 
-        return trace
+        GLOBAL CONFLICT:
+            Nếu một transaction vừa có COMMIT vừa có ABORT ở các site khác nhau,
+            clean log sẽ chuẩn hóa về ABORT.
+        """
 
-    def _write_clean_logs(self,
-    site_logs: Dict[str, List[LogRecord]],
-    analyses: List[TransactionAnalysis],
-) -> None:
+        self.clean_logs_dir.mkdir(parents=True, exist_ok=True)
+
         max_timestamp = max(
-            (r.timestamp for records in site_logs.values() for r in records),
+            (
+                record.timestamp
+                for records in site_logs.values()
+                for record in records
+            ),
             default=0,
         )
         next_timestamp = max_timestamp + 1
 
         for site_id, records in site_logs.items():
             clean_records = list(records)
-            tx_ids_in_site = {r.transaction_id for r in records}
+
+            tx_ids_in_site = {
+                record.transaction_id
+                for record in records
+            }
 
             for analysis in analyses:
-                if analysis.transaction_id not in tx_ids_in_site:
+                transaction_id = analysis.transaction_id
+                decision = analysis.decision
+
+                if transaction_id not in tx_ids_in_site:
                     continue
 
-                states = set(analysis.site_states.values())
+                # KEEP: log đã hoàn chỉnh, không cần sửa.
+                if decision == GlobalDecision.KEEP:
+                    continue
+
+                # UNCERTAIN: không tự ý bổ sung COMMIT/ABORT.
+                if decision == GlobalDecision.UNCERTAIN:
+                    continue
+
+                state_values = set(analysis.site_states.values())
+
                 is_global_conflict = (
-                    SiteState.COMMITTED in states
-                    and SiteState.ABORTED in states
-                    and analysis.decision == GlobalDecision.UNDO
+                    SiteState.COMMITTED in state_values
+                    and SiteState.ABORTED in state_values
+                    and decision == GlobalDecision.UNDO
                 )
 
                 repair_op = analysis.repaired_sites.get(site_id)
 
-                # Nếu là conflict COMMIT/ABORT và site hiện tại từng ghi COMMIT,
-                # clean log cần bỏ COMMIT cũ để chuẩn hóa về ABORT.
-                if is_global_conflict and repair_op == "ABORT":
+                # Conflict, ví dụ T13:
+                # SITE1 COMMIT, SITE2 ABORT, SITE3 READY.
+                # Vì quyết định là UNDO an toàn, loại bỏ COMMIT lỗi
+                # rồi ghi ABORT để clean log nhất quán.
+                if is_global_conflict:
                     clean_records = [
-                        r for r in clean_records
+                        record
+                        for record in clean_records
                         if not (
-                            r.transaction_id == analysis.transaction_id
-                            and r.operation == "COMMIT"
+                            record.transaction_id == transaction_id
+                            and record.operation.upper() == "COMMIT"
                         )
                     ]
 
-                if repair_op:
-                    clean_records.append(
-                        LogRecord(
-                            timestamp=next_timestamp,
-                            site_id=site_id,
-                            transaction_id=analysis.transaction_id,
-                            operation=repair_op,
-                        )
+                    has_abort = any(
+                        record.transaction_id == transaction_id
+                        and record.operation.upper() == "ABORT"
+                        for record in clean_records
                     )
-                    next_timestamp += 1
 
-            clean_records.sort(key=lambda r: r.timestamp)
+                    if not has_abort:
+                        clean_records.append(
+                            LogRecord(
+                                timestamp=next_timestamp,
+                                site_id=site_id,
+                                transaction_id=transaction_id,
+                                operation="ABORT",
+                            )
+                        )
+                        next_timestamp += 1
+
+                    continue
+
+                # Case bình thường: bổ sung COMMIT hoặc ABORT nếu cần.
+                if repair_op:
+                    already_has_repair = any(
+                        record.transaction_id == transaction_id
+                        and record.operation.upper() == repair_op
+                        for record in clean_records
+                    )
+
+                    if not already_has_repair:
+                        clean_records.append(
+                            LogRecord(
+                                timestamp=next_timestamp,
+                                site_id=site_id,
+                                transaction_id=transaction_id,
+                                operation=repair_op,
+                            )
+                        )
+                        next_timestamp += 1
+
+            clean_records.sort(key=lambda record: record.timestamp)
+
             output_file = self.clean_logs_dir / f"{site_id.lower()}_clean.log"
 
-            with output_file.open("w", encoding="utf-8") as f:
+            with output_file.open("w", encoding="utf-8") as file:
                 for record in clean_records:
-                    f.write(record.to_log_line() + "\n")
+                    file.write(record.to_log_line() + "\n")
+
     def _write_report(
         self,
         report_path: Path,
@@ -206,82 +408,240 @@ class RecoveryManager:
         dirty_db: Dict[str, int],
         clean_db: Dict[str, int],
     ) -> None:
-        redo = [a.transaction_id for a in analyses if a.decision == GlobalDecision.REDO]
-        undo = [a.transaction_id for a in analyses if a.decision == GlobalDecision.UNDO]
-        uncertain = [a.transaction_id for a in analyses if a.decision == GlobalDecision.UNCERTAIN]
+        """
+        Ghi recovery_report.txt.
 
-        with report_path.open("w", encoding="utf-8") as f:
-            f.write("BÁO CÁO PHỤC HỒI LOG PHÂN TÁN\n")
-            f.write("================================\n\n")
-            f.write("Dự án: Distributed Log Recovery Manager - Phân tích sau crash\n")
-            f.write("Giao thức nền tảng: Phục hồi dựa trên Two-Phase Commit (2PC)\n")
-            f.write("Giả định coordinator: SITE1\n\n")
+        Report này dùng để chứng minh:
+        - Hệ thống đọc log của 3 site.
+        - Transaction được phân tích state rõ ràng.
+        - Có phân biệt KEEP, REDO, UNDO, UNCERTAIN.
+        - Có lý do và liên hệ 2PC.
+        - Có trace REDO/UNDO.
+        - Có dirty DB trước recovery và clean DB sau recovery.
+        """
 
-            f.write("1. Các site đầu vào\n")
-            for site_id in sorted(site_logs.keys()):
-                f.write(f"- {site_id}: {len(site_logs[site_id])} bản ghi log\n")
-            f.write("\n")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
 
-            f.write("2. Phân tích trạng thái transaction\n")
-            f.write("-----------------------------\n")
-            for a in analyses:
-                f.write(f"\nTransaction {a.transaction_id}\n")
-                for site_id, state in sorted(a.site_states.items()):
-                    f.write(f"  {site_id}: {state.value}\n")
-                f.write(f"  Quyết định: {a.decision.value}\n")
-                f.write(f"  Lý do: {a.reason}\n")
-                f.write(f"  Liên hệ lý thuyết 2PC: {a.textbook_rule}\n")
-                if a.repaired_sites:
-                    f.write("  Sửa clean log:\n")
-                    for site_id, op in sorted(a.repaired_sites.items()):
-                        f.write(f"    - {site_id}: bổ sung {op}\n")
+        keep_list = [
+            analysis.transaction_id
+            for analysis in analyses
+            if analysis.decision == GlobalDecision.KEEP
+        ]
 
-            f.write("\n\n3. Tóm tắt phục hồi\n")
-            f.write("-------------------\n")
-            f.write(f"DANH SÁCH REDO: {', '.join(redo) if redo else 'Không có'}\n")
-            f.write(f"DANH SÁCH UNDO: {', '.join(undo) if undo else 'Không có'}\n")
-            f.write(f"DANH SÁCH UNCERTAIN: {', '.join(uncertain) if uncertain else 'Không có'}\n")
+        redo_list = [
+            analysis.transaction_id
+            for analysis in analyses
+            if analysis.decision == GlobalDecision.REDO
+        ]
 
-            f.write("\n4. Database trước phục hồi (Dirty DB)\n")
-            f.write(json.dumps(dirty_db, indent=2, ensure_ascii=False, sort_keys=True))
-            f.write("\n\n5. Database sau phục hồi (Clean DB)\n")
-            f.write(json.dumps(clean_db, indent=2, ensure_ascii=False, sort_keys=True))
-            f.write("\n\n6. Trace thao tác REDO/UNDO\n")
-            f.write("----------------------------\n")
-            operation_trace = self._build_operation_trace(site_logs, analyses)
+        undo_list = [
+            analysis.transaction_id
+            for analysis in analyses
+            if analysis.decision == GlobalDecision.UNDO
+        ]
 
-            f.write("\nTHAO TÁC REDO:\n")
-            if not any(operation_trace["REDO"].values()):
-                f.write("- Không có\n")
+        uncertain_list = [
+            analysis.transaction_id
+            for analysis in analyses
+            if analysis.decision == GlobalDecision.UNCERTAIN
+        ]
+
+        updates_by_transaction = self._collect_updates_by_transaction(site_logs)
+
+        def format_list(items: List[str]) -> str:
+            if not items:
+                return "Không có"
+            return ", ".join(sorted(items))
+
+        with report_path.open("w", encoding="utf-8") as file:
+            file.write("BÁO CÁO PHỤC HỒI LOG PHÂN TÁN\n")
+            file.write("====================================\n\n")
+
+            file.write("1. MỤC TIÊU BÁO CÁO\n")
+            file.write("------------------------------------\n")
+            file.write(
+                "Báo cáo này mô tả quá trình phục hồi cơ sở dữ liệu phân tán "
+                "sau crash. Chương trình đọc dirty logs của 3 site, phân tích "
+                "trạng thái transaction theo Two-Phase Commit, sau đó quyết định "
+                "KEEP, REDO, UNDO hoặc UNCERTAIN.\n\n"
+            )
+            file.write(
+                "KEEP nghĩa là transaction đã COMMIT đầy đủ ở các site tham gia, "
+                "nên giữ nguyên kết quả.\n"
+            )
+            file.write(
+                "REDO nghĩa là transaction đã có global COMMIT nhưng còn site/log "
+                "thiếu COMMIT, nên cần hoàn tất bằng after_value.\n"
+            )
+            file.write(
+                "UNDO nghĩa là transaction bị ABORT, chưa hoàn tất hoặc conflict, "
+                "nên phải khôi phục before_value.\n\n"
+            )
+
+            file.write("2. INPUT SITES\n")
+            file.write("------------------------------------\n")
+            for site_id, records in sorted(site_logs.items()):
+                file.write(f"- {site_id}: {len(records)} dòng log\n")
+            file.write("\n")
+
+            file.write("3. TÓM TẮT KẾT QUẢ PHỤC HỒI\n")
+            file.write("------------------------------------\n")
+            file.write(f"Số transaction đã phân tích: {len(analyses)}\n")
+            file.write(
+                f"KEEP  - Giữ nguyên transaction hoàn chỉnh: "
+                f"{format_list(keep_list)}\n"
+            )
+            file.write(
+                f"REDO  - Hoàn tất transaction có global COMMIT: "
+                f"{format_list(redo_list)}\n"
+            )
+            file.write(
+                f"UNDO  - Rollback transaction lỗi/chưa hoàn tất: "
+                f"{format_list(undo_list)}\n"
+            )
+            file.write(
+                f"UNCERTAIN - Chưa có quyết định rõ: "
+                f"{format_list(uncertain_list)}\n\n"
+            )
+
+            file.write("4. PHÂN TÍCH STATE TỪNG TRANSACTION\n")
+            file.write("------------------------------------\n")
+
+            for analysis in sorted(analyses, key=lambda item: item.transaction_id):
+                file.write(f"\nTransaction {analysis.transaction_id}\n")
+                file.write("~" * (12 + len(analysis.transaction_id)) + "\n")
+
+                file.write("Trạng thái tại từng site:\n")
+                for site_id, state in sorted(analysis.site_states.items()):
+                    file.write(f"  - {site_id}: {state.value}\n")
+
+                file.write(f"Quyết định: {analysis.decision.value}\n")
+                file.write(f"Lý do: {analysis.reason}\n")
+                file.write(f"Liên hệ lý thuyết: {analysis.textbook_rule}\n")
+
+                if analysis.repaired_sites:
+                    file.write("Sửa clean log:\n")
+                    for site_id, operation in sorted(
+                        analysis.repaired_sites.items()
+                    ):
+                        file.write(
+                            f"  - {site_id}: bổ sung/chuẩn hóa {operation}\n"
+                        )
+                else:
+                    file.write("Sửa clean log: Không cần sửa\n")
+
+            file.write("\n\n5. DIRTY DATABASE TRƯỚC RECOVERY\n")
+            file.write("------------------------------------\n")
+            for key, value in sorted(dirty_db.items()):
+                file.write(f"{key}: {value}\n")
+
+            file.write("\n6. CLEAN DATABASE SAU RECOVERY\n")
+            file.write("------------------------------------\n")
+            for key, value in sorted(clean_db.items()):
+                file.write(f"{key}: {value}\n")
+
+            file.write("\n7. THAY ĐỔI DATABASE SAU RECOVERY\n")
+            file.write("------------------------------------\n")
+
+            changed_items = []
+            all_items = sorted(set(dirty_db.keys()) | set(clean_db.keys()))
+
+            for item in all_items:
+                old_value = dirty_db.get(item)
+                new_value = clean_db.get(item)
+
+                if old_value != new_value:
+                    changed_items.append(item)
+                    file.write(f"- {item}: {old_value} -> {new_value}\n")
+
+            if not changed_items:
+                file.write("Không có thay đổi giá trị database.\n")
+
+            file.write("\n8. REDO/UNDO OPERATION TRACE\n")
+            file.write("------------------------------------\n")
+
+            file.write("8.1. KEEP OPERATIONS\n")
+            file.write("....................................\n")
+            if keep_list:
+                for tx_id in sorted(keep_list):
+                    file.write(
+                        f"{tx_id}: transaction đã COMMIT đầy đủ, "
+                        "giữ nguyên kết quả, không cần thao tác phục hồi.\n"
+                    )
             else:
-                for tx_id, lines in operation_trace["REDO"].items():
-                    if not lines:
-                        f.write(f"{tx_id}: không có bản ghi UPDATE; quyết định là REDO nhưng giá trị database không thay đổi.\n")
-                        continue
-                    f.write(f"{tx_id}:\n")
-                    for line in lines:
-                        f.write(f"- {line}\n")
+                file.write("Không có transaction KEEP.\n")
 
-            f.write("\nTHAO TÁC UNDO:\n")
-            if not any(operation_trace["UNDO"].values()):
-                f.write("- Không có\n")
+            file.write("\n8.2. REDO OPERATIONS\n")
+            file.write("....................................\n")
+            if redo_list:
+                for tx_id in sorted(redo_list):
+                    file.write(f"{tx_id}:\n")
+
+                    redo_records = sorted(
+                        updates_by_transaction.get(tx_id, []),
+                        key=lambda record: record.timestamp,
+                    )
+
+                    if not redo_records:
+                        file.write("  - Không có UPDATE để REDO.\n")
+
+                    for record in redo_records:
+                        file.write(
+                            f"  - {record.site_id} {record.item}: "
+                            f"{record.before_value} -> {record.after_value} "
+                            f"(áp dụng after_value, ts={record.timestamp})\n"
+                        )
             else:
-                for tx_id, lines in operation_trace["UNDO"].items():
-                    if not lines:
-                        f.write(f"{tx_id}: không có bản ghi UPDATE; quyết định là UNDO nhưng giá trị database không thay đổi.\n")
-                        continue
-                    f.write(f"{tx_id}:\n")
-                    for line in lines:
-                        f.write(f"- {line}\n")
+                file.write("Không có transaction REDO.\n")
 
-            f.write("\nGiải thích trace:\n")
-            f.write("- REDO áp dụng after_value theo thứ tự timestamp tăng dần.\n")
-            f.write("- UNDO khôi phục before_value theo thứ tự timestamp giảm dần.\n")
-            f.write("- Phần này chứng minh chương trình phục hồi dữ liệu thật, không chỉ phân loại transaction.\n")
+            file.write("\n8.3. UNDO OPERATIONS\n")
+            file.write("....................................\n")
+            if undo_list:
+                for tx_id in sorted(undo_list):
+                    file.write(f"{tx_id}:\n")
 
-            f.write("\n7. Các file được tạo\n")
-            f.write("- output/clean_db.json\n")
-            f.write("- output/recovery_report.txt\n")
-            f.write("- output/clean_logs/\n")
-            if (self.output_dir / "crash_simulation_report.txt").exists():
-                f.write("- output/crash_simulation_report.txt\n")
+                    undo_records = sorted(
+                        updates_by_transaction.get(tx_id, []),
+                        key=lambda record: record.timestamp,
+                        reverse=True,
+                    )
+
+                    if not undo_records:
+                        file.write("  - Không có UPDATE để UNDO.\n")
+
+                    for record in undo_records:
+                        file.write(
+                            f"  - {record.site_id} {record.item}: rollback "
+                            f"{record.after_value} -> {record.before_value} "
+                            f"(khôi phục before_value, ts={record.timestamp})\n"
+                        )
+            else:
+                file.write("Không có transaction UNDO.\n")
+
+            file.write("\n8.4. UNCERTAIN OPERATIONS\n")
+            file.write("....................................\n")
+            if uncertain_list:
+                for tx_id in sorted(uncertain_list):
+                    file.write(
+                        f"{tx_id}: transaction chưa có quyết định rõ ràng, "
+                        "không tự ý sửa database trong chế độ keep_uncertain.\n"
+                    )
+            else:
+                file.write("Không có transaction UNCERTAIN.\n")
+
+            file.write("\n9. FILE OUTPUT ĐƯỢC TẠO\n")
+            file.write("------------------------------------\n")
+            file.write("- output/recovery_report.txt: báo cáo phục hồi này\n")
+            file.write("- output/clean_db.json: database sạch sau recovery\n")
+            file.write("- output/clean_logs/site1_clean.log: clean log của SITE1\n")
+            file.write("- output/clean_logs/site2_clean.log: clean log của SITE2\n")
+            file.write("- output/clean_logs/site3_clean.log: clean log của SITE3\n")
+
+            file.write("\n10. KẾT LUẬN\n")
+            file.write("------------------------------------\n")
+            file.write(
+                "Chương trình đã thực hiện post-crash log analysis bằng cách đọc "
+                "dirty logs của 3 site, phân tích state theo Two-Phase Commit, "
+                "tách rõ KEEP/REDO/UNDO/UNCERTAIN, phục hồi database và tạo "
+                "clean logs sau recovery.\n"
+            )

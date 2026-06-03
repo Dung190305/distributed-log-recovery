@@ -1,264 +1,315 @@
 BÁO CÁO PHỤC HỒI LOG PHÂN TÁN
-================================
+====================================
 
-Dự án: Distributed Log Recovery Manager - Phân tích sau crash
-Giao thức nền tảng: Phục hồi dựa trên Two-Phase Commit (2PC)
-Giả định coordinator: SITE1
+1. MỤC TIÊU BÁO CÁO
+------------------------------------
+Báo cáo này mô tả quá trình phục hồi cơ sở dữ liệu phân tán sau crash. Chương trình đọc dirty logs của 3 site, phân tích trạng thái transaction theo Two-Phase Commit, sau đó quyết định KEEP, REDO, UNDO hoặc UNCERTAIN.
 
-1. Các site đầu vào
-- SITE1: 44 bản ghi log
-- SITE2: 38 bản ghi log
-- SITE3: 35 bản ghi log
+KEEP nghĩa là transaction đã COMMIT đầy đủ ở các site tham gia, nên giữ nguyên kết quả.
+REDO nghĩa là transaction đã có global COMMIT nhưng còn site/log thiếu COMMIT, nên cần hoàn tất bằng after_value.
+UNDO nghĩa là transaction bị ABORT, chưa hoàn tất hoặc conflict, nên phải khôi phục before_value.
 
-2. Phân tích trạng thái transaction
------------------------------
+2. INPUT SITES
+------------------------------------
+- SITE1: 44 dòng log
+- SITE2: 38 dòng log
+- SITE3: 35 dòng log
+
+3. TÓM TẮT KẾT QUẢ PHỤC HỒI
+------------------------------------
+Số transaction đã phân tích: 13
+KEEP  - Giữ nguyên transaction hoàn chỉnh: T1, T10, T11
+REDO  - Hoàn tất transaction có global COMMIT: T4, T6, T8
+UNDO  - Rollback transaction lỗi/chưa hoàn tất: T12, T13, T2, T3, T5, T7, T9
+UNCERTAIN - Chưa có quyết định rõ: Không có
+
+4. PHÂN TÍCH STATE TỪNG TRANSACTION
+------------------------------------
 
 Transaction T1
-  SITE1: COMMITTED
-  SITE2: COMMITTED
-  SITE3: COMMITTED
-  Quyết định: REDO
-  Lý do: Tồn tại bản ghi COMMIT, nên quyết định toàn cục được xác định là commit. Các site thiếu COMMIT sẽ được sửa trong clean log.
-  Liên hệ lý thuyết 2PC: Bản ghi quyết định của 2PC: khi global commit đã được ghi log, các participant phải commit khi phục hồi.
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: COMMITTED
+  - SITE2: COMMITTED
+  - SITE3: COMMITTED
+Quyết định: KEEP
+Lý do: Tất cả site tham gia transaction đều đã COMMIT. Đây là trường hợp hoàn chỉnh, giữ nguyên kết quả.
+Liên hệ lý thuyết: Transaction đã commit đầy đủ nên không cần rollback, không cần sửa clean log. Kết quả đã commit được bảo toàn.
+Sửa clean log: Không cần sửa
 
 Transaction T10
-  SITE1: COMMITTED
-  SITE2: COMMITTED
-  SITE3: COMMITTED
-  Quyết định: REDO
-  Lý do: Tồn tại bản ghi COMMIT, nên quyết định toàn cục được xác định là commit. Các site thiếu COMMIT sẽ được sửa trong clean log.
-  Liên hệ lý thuyết 2PC: Bản ghi quyết định của 2PC: khi global commit đã được ghi log, các participant phải commit khi phục hồi.
+~~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: COMMITTED
+  - SITE2: COMMITTED
+  - SITE3: COMMITTED
+Quyết định: KEEP
+Lý do: Tất cả site tham gia transaction đều đã COMMIT. Đây là trường hợp hoàn chỉnh, giữ nguyên kết quả.
+Liên hệ lý thuyết: Transaction đã commit đầy đủ nên không cần rollback, không cần sửa clean log. Kết quả đã commit được bảo toàn.
+Sửa clean log: Không cần sửa
 
 Transaction T11
-  SITE1: COMMITTED
-  SITE2: COMMITTED
-  SITE3: COMMITTED
-  Quyết định: REDO
-  Lý do: Tồn tại bản ghi COMMIT, nên quyết định toàn cục được xác định là commit. Các site thiếu COMMIT sẽ được sửa trong clean log.
-  Liên hệ lý thuyết 2PC: Bản ghi quyết định của 2PC: khi global commit đã được ghi log, các participant phải commit khi phục hồi.
+~~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: COMMITTED
+  - SITE2: COMMITTED
+  - SITE3: COMMITTED
+Quyết định: KEEP
+Lý do: Tất cả site tham gia transaction đều đã COMMIT. Đây là trường hợp hoàn chỉnh, giữ nguyên kết quả.
+Liên hệ lý thuyết: Transaction đã commit đầy đủ nên không cần rollback, không cần sửa clean log. Kết quả đã commit được bảo toàn.
+Sửa clean log: Không cần sửa
 
 Transaction T12
-  SITE1: READY
-  SITE2: READY
-  SITE3: ABORTED
-  Quyết định: UNDO
-  Lý do: Có ít nhất một site ghi ABORT và không có xung đột COMMIT. Trong 2PC, chỉ cần một site/vote abort thì toàn bộ transaction phải global abort.
-  Liên hệ lý thuyết 2PC: Quy tắc 2PC: nếu một participant vote abort, coordinator phải quyết định global abort.
-  Sửa clean log:
-    - SITE1: bổ sung ABORT
-    - SITE2: bổ sung ABORT
+~~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: READY
+  - SITE2: READY
+  - SITE3: ABORTED
+Quyết định: UNDO
+Lý do: Có ít nhất một site ghi ABORT, nên toàn bộ transaction phải UNDO.
+Liên hệ lý thuyết: Theo 2PC, chỉ cần một participant abort thì global decision phải là ABORT.
+Sửa clean log:
+  - SITE1: bổ sung/chuẩn hóa ABORT
+  - SITE2: bổ sung/chuẩn hóa ABORT
 
 Transaction T13
-  SITE1: COMMITTED
-  SITE2: ABORTED
-  SITE3: READY
-  Quyết định: UNDO
-  Lý do: Phát hiện xung đột toàn cục: có site ghi COMMIT nhưng site khác ghi ABORT cho cùng một transaction. Điều này vi phạm tính atomic commitment của 2PC. Cách xử lý an toàn là UNDO và báo cáo lỗi xung đột.
-  Liên hệ lý thuyết 2PC: Quy tắc atomicity của 2PC: một transaction phân tán chỉ được có một quyết định toàn cục, hoặc COMMIT ở tất cả site, hoặc ABORT ở tất cả site.
-  Sửa clean log:
-    - SITE1: bổ sung ABORT
-    - SITE3: bổ sung ABORT
+~~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: COMMITTED
+  - SITE2: ABORTED
+  - SITE3: READY
+Quyết định: UNDO
+Lý do: Phát hiện global conflict: một số site COMMIT nhưng site khác ABORT. Chọn UNDO an toàn.
+Liên hệ lý thuyết: Theo 2PC, atomic commitment yêu cầu một transaction phân tán chỉ có một quyết định toàn cục: COMMIT toàn bộ hoặc ABORT toàn bộ.
+Sửa clean log:
+  - SITE1: bổ sung/chuẩn hóa ABORT
+  - SITE3: bổ sung/chuẩn hóa ABORT
 
 Transaction T2
-  SITE1: READY
-  SITE2: ABORTED
-  SITE3: READY
-  Quyết định: UNDO
-  Lý do: Có ít nhất một site ghi ABORT và không có xung đột COMMIT. Trong 2PC, chỉ cần một site/vote abort thì toàn bộ transaction phải global abort.
-  Liên hệ lý thuyết 2PC: Quy tắc 2PC: nếu một participant vote abort, coordinator phải quyết định global abort.
-  Sửa clean log:
-    - SITE1: bổ sung ABORT
-    - SITE3: bổ sung ABORT
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: READY
+  - SITE2: ABORTED
+  - SITE3: READY
+Quyết định: UNDO
+Lý do: Có ít nhất một site ghi ABORT, nên toàn bộ transaction phải UNDO.
+Liên hệ lý thuyết: Theo 2PC, chỉ cần một participant abort thì global decision phải là ABORT.
+Sửa clean log:
+  - SITE1: bổ sung/chuẩn hóa ABORT
+  - SITE3: bổ sung/chuẩn hóa ABORT
 
 Transaction T3
-  SITE1: READY
-  SITE2: READY
-  SITE3: READY
-  Quyết định: UNDO
-  Lý do: Tất cả site đều ở trạng thái READY nhưng không có COMMIT/ABORT toàn cục. Chính sách timeout-abort được áp dụng để tạo trạng thái database sạch.
-  Liên hệ lý thuyết 2PC: Trường hợp blocking của 2PC: participant ở READY không thể tự commit nếu chưa có quyết định toàn cục; cần timeout/termination policy.
-  Sửa clean log:
-    - SITE1: bổ sung ABORT
-    - SITE2: bổ sung ABORT
-    - SITE3: bổ sung ABORT
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: READY
+  - SITE2: READY
+  - SITE3: READY
+Quyết định: UNDO
+Lý do: Transaction READY nhưng không tìm thấy global decision. Project áp dụng timeout abort policy nên UNDO.
+Liên hệ lý thuyết: READY không đồng nghĩa với COMMIT. Nếu sau crash không tìm thấy quyết định toàn cục, project chọn ABORT để tạo clean database.
+Sửa clean log:
+  - SITE1: bổ sung/chuẩn hóa ABORT
+  - SITE2: bổ sung/chuẩn hóa ABORT
+  - SITE3: bổ sung/chuẩn hóa ABORT
 
 Transaction T4
-  SITE1: COMMITTED
-  SITE2: COMMITTED
-  SITE3: READY
-  Quyết định: REDO
-  Lý do: Tồn tại bản ghi COMMIT, nên quyết định toàn cục được xác định là commit. Các site thiếu COMMIT sẽ được sửa trong clean log.
-  Liên hệ lý thuyết 2PC: Bản ghi quyết định của 2PC: khi global commit đã được ghi log, các participant phải commit khi phục hồi.
-  Sửa clean log:
-    - SITE3: bổ sung COMMIT
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: COMMITTED
+  - SITE2: COMMITTED
+  - SITE3: READY
+Quyết định: REDO
+Lý do: Đã có global COMMIT nhưng một số site chưa ghi COMMIT đầy đủ. Cần REDO/hoàn tất commit.
+Liên hệ lý thuyết: Theo recovery sau 2PC, khi đã có quyết định COMMIT, hệ thống phải đảm bảo các thay đổi đã commit được bảo toàn ở các participant.
+Sửa clean log:
+  - SITE3: bổ sung/chuẩn hóa COMMIT
 
 Transaction T5
-  SITE1: ACTIVE
-  SITE2: ACTIVE
-  SITE3: ACTIVE
-  Quyết định: UNDO
-  Lý do: Transaction chưa đạt global commit một cách an toàn, nên phải UNDO để bảo toàn tính nguyên tử.
-  Liên hệ lý thuyết 2PC: Quy tắc atomicity: transaction chưa hoàn tất không được để lại tác động dang dở sau crash.
-  Sửa clean log:
-    - SITE1: bổ sung ABORT
-    - SITE2: bổ sung ABORT
-    - SITE3: bổ sung ABORT
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: ACTIVE
+  - SITE2: ACTIVE
+  - SITE3: ACTIVE
+Quyết định: UNDO
+Lý do: Transaction mới ACTIVE hoặc chưa PREPARE đầy đủ, nên UNDO.
+Liên hệ lý thuyết: Transaction chưa đạt trạng thái commit an toàn thì không được để lại ảnh hưởng trong database.
+Sửa clean log:
+  - SITE1: bổ sung/chuẩn hóa ABORT
+  - SITE2: bổ sung/chuẩn hóa ABORT
+  - SITE3: bổ sung/chuẩn hóa ABORT
 
 Transaction T6
-  SITE1: COMMITTED
-  SITE2: READY
-  SITE3: READY
-  Quyết định: REDO
-  Lý do: Tồn tại bản ghi COMMIT, nên quyết định toàn cục được xác định là commit. Các site thiếu COMMIT sẽ được sửa trong clean log.
-  Liên hệ lý thuyết 2PC: Bản ghi quyết định của 2PC: khi global commit đã được ghi log, các participant phải commit khi phục hồi.
-  Sửa clean log:
-    - SITE2: bổ sung COMMIT
-    - SITE3: bổ sung COMMIT
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: COMMITTED
+  - SITE2: READY
+  - SITE3: READY
+Quyết định: REDO
+Lý do: Đã có global COMMIT nhưng một số site chưa ghi COMMIT đầy đủ. Cần REDO/hoàn tất commit.
+Liên hệ lý thuyết: Theo recovery sau 2PC, khi đã có quyết định COMMIT, hệ thống phải đảm bảo các thay đổi đã commit được bảo toàn ở các participant.
+Sửa clean log:
+  - SITE2: bổ sung/chuẩn hóa COMMIT
+  - SITE3: bổ sung/chuẩn hóa COMMIT
 
 Transaction T7
-  SITE1: READY
-  SITE2: ABORTED
-  SITE3: READY
-  Quyết định: UNDO
-  Lý do: Có ít nhất một site ghi ABORT và không có xung đột COMMIT. Trong 2PC, chỉ cần một site/vote abort thì toàn bộ transaction phải global abort.
-  Liên hệ lý thuyết 2PC: Quy tắc 2PC: nếu một participant vote abort, coordinator phải quyết định global abort.
-  Sửa clean log:
-    - SITE1: bổ sung ABORT
-    - SITE3: bổ sung ABORT
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: READY
+  - SITE2: ABORTED
+  - SITE3: READY
+Quyết định: UNDO
+Lý do: Có ít nhất một site ghi ABORT, nên toàn bộ transaction phải UNDO.
+Liên hệ lý thuyết: Theo 2PC, chỉ cần một participant abort thì global decision phải là ABORT.
+Sửa clean log:
+  - SITE1: bổ sung/chuẩn hóa ABORT
+  - SITE3: bổ sung/chuẩn hóa ABORT
 
 Transaction T8
-  SITE1: COMMITTED
-  SITE2: READY
-  SITE3: READY
-  Quyết định: REDO
-  Lý do: Tồn tại bản ghi COMMIT, nên quyết định toàn cục được xác định là commit. Các site thiếu COMMIT sẽ được sửa trong clean log.
-  Liên hệ lý thuyết 2PC: Bản ghi quyết định của 2PC: khi global commit đã được ghi log, các participant phải commit khi phục hồi.
-  Sửa clean log:
-    - SITE2: bổ sung COMMIT
-    - SITE3: bổ sung COMMIT
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: COMMITTED
+  - SITE2: READY
+  - SITE3: READY
+Quyết định: REDO
+Lý do: Đã có global COMMIT nhưng một số site chưa ghi COMMIT đầy đủ. Cần REDO/hoàn tất commit.
+Liên hệ lý thuyết: Theo recovery sau 2PC, khi đã có quyết định COMMIT, hệ thống phải đảm bảo các thay đổi đã commit được bảo toàn ở các participant.
+Sửa clean log:
+  - SITE2: bổ sung/chuẩn hóa COMMIT
+  - SITE3: bổ sung/chuẩn hóa COMMIT
 
 Transaction T9
-  SITE1: ABORTED
-  SITE2: ACTIVE
-  SITE3: READY
-  Quyết định: UNDO
-  Lý do: Có ít nhất một site ghi ABORT và không có xung đột COMMIT. Trong 2PC, chỉ cần một site/vote abort thì toàn bộ transaction phải global abort.
-  Liên hệ lý thuyết 2PC: Quy tắc 2PC: nếu một participant vote abort, coordinator phải quyết định global abort.
-  Sửa clean log:
-    - SITE2: bổ sung ABORT
-    - SITE3: bổ sung ABORT
+~~~~~~~~~~~~~~
+Trạng thái tại từng site:
+  - SITE1: ABORTED
+  - SITE2: ACTIVE
+  - SITE3: READY
+Quyết định: UNDO
+Lý do: Có ít nhất một site ghi ABORT, nên toàn bộ transaction phải UNDO.
+Liên hệ lý thuyết: Theo 2PC, chỉ cần một participant abort thì global decision phải là ABORT.
+Sửa clean log:
+  - SITE2: bổ sung/chuẩn hóa ABORT
+  - SITE3: bổ sung/chuẩn hóa ABORT
 
 
-3. Tóm tắt phục hồi
--------------------
-DANH SÁCH REDO: T1, T10, T11, T4, T6, T8
-DANH SÁCH UNDO: T12, T13, T2, T3, T5, T7, T9
-DANH SÁCH UNCERTAIN: Không có
+5. DIRTY DATABASE TRƯỚC RECOVERY
+------------------------------------
+A: 150
+B: 250
+C: 350
+D: 450
+E: 550
+F: 650
+G: 750
+H: 999
+I: 950
+J: 1050
+K: 1150
+L: 1250
+M: 1350
+N: 1450
+O: 1550
+P: 1650
+Q: 1750
+R: 1880
+S: 1950
+T: 2300
+U: 2150
+V: 2250
 
-4. Database trước phục hồi (Dirty DB)
-{
-  "A": 150,
-  "B": 250,
-  "C": 350,
-  "D": 450,
-  "E": 550,
-  "F": 650,
-  "G": 750,
-  "H": 999,
-  "I": 950,
-  "J": 1050,
-  "K": 1150,
-  "L": 1250,
-  "M": 1350,
-  "N": 1450,
-  "O": 1550,
-  "P": 1650,
-  "Q": 1750,
-  "R": 1880,
-  "S": 1950,
-  "T": 2300,
-  "U": 2150,
-  "V": 2250
-}
+6. CLEAN DATABASE SAU RECOVERY
+------------------------------------
+A: 150
+B: 250
+C: 350
+D: 400
+E: 500
+F: 600
+G: 750
+H: 800
+I: 950
+J: 1050
+K: 1100
+L: 1200
+M: 1350
+N: 1450
+O: 1550
+P: 1600
+Q: 1700
+R: 1880
+S: 1950
+T: 2000
+U: 2100
+V: 2200
 
-5. Database sau phục hồi (Clean DB)
-{
-  "A": 150,
-  "B": 250,
-  "C": 350,
-  "D": 400,
-  "E": 500,
-  "F": 600,
-  "G": 750,
-  "H": 800,
-  "I": 950,
-  "J": 1050,
-  "K": 1100,
-  "L": 1200,
-  "M": 1350,
-  "N": 1450,
-  "O": 1550,
-  "P": 1600,
-  "Q": 1700,
-  "R": 1880,
-  "S": 1950,
-  "T": 2000,
-  "U": 2100,
-  "V": 2200
-}
+7. THAY ĐỔI DATABASE SAU RECOVERY
+------------------------------------
+- D: 450 -> 400
+- E: 550 -> 500
+- F: 650 -> 600
+- H: 999 -> 800
+- K: 1150 -> 1100
+- L: 1250 -> 1200
+- P: 1650 -> 1600
+- Q: 1750 -> 1700
+- T: 2300 -> 2000
+- U: 2150 -> 2100
+- V: 2250 -> 2200
 
-6. Trace thao tác REDO/UNDO
-----------------------------
+8. REDO/UNDO OPERATION TRACE
+------------------------------------
+8.1. KEEP OPERATIONS
+....................................
+T1: transaction đã COMMIT đầy đủ, giữ nguyên kết quả, không cần thao tác phục hồi.
+T10: transaction đã COMMIT đầy đủ, giữ nguyên kết quả, không cần thao tác phục hồi.
+T11: transaction đã COMMIT đầy đủ, giữ nguyên kết quả, không cần thao tác phục hồi.
 
-THAO TÁC REDO:
-T1:
-- SITE1 A: 100 -> 150 (áp dụng after_value, timestamp=2)
-- SITE2 B: 200 -> 250 (áp dụng after_value, timestamp=6)
-- SITE3 C: 300 -> 350 (áp dụng after_value, timestamp=10)
-T10: không có bản ghi UPDATE; quyết định là REDO nhưng giá trị database không thay đổi.
-T11:
-- SITE1 R: 1800 -> 1850 (áp dụng after_value, timestamp=108)
-- SITE2 S: 1900 -> 1950 (áp dụng after_value, timestamp=112)
-- SITE3 R: 1850 -> 1880 (áp dụng after_value, timestamp=116)
+8.2. REDO OPERATIONS
+....................................
 T4:
-- SITE3 G: 700 -> 750 (áp dụng after_value, timestamp=40)
+  - SITE3 G: 700 -> 750 (áp dụng after_value, ts=40)
 T6:
-- SITE1 I: 900 -> 950 (áp dụng after_value, timestamp=51)
-- SITE2 J: 1000 -> 1050 (áp dụng after_value, timestamp=55)
+  - SITE1 I: 900 -> 950 (áp dụng after_value, ts=51)
+  - SITE2 J: 1000 -> 1050 (áp dụng after_value, ts=55)
 T8:
-- SITE1 M: 1300 -> 1350 (áp dụng after_value, timestamp=74)
-- SITE2 N: 1400 -> 1450 (áp dụng after_value, timestamp=78)
-- SITE3 O: 1500 -> 1550 (áp dụng after_value, timestamp=81)
+  - SITE1 M: 1300 -> 1350 (áp dụng after_value, ts=74)
+  - SITE2 N: 1400 -> 1450 (áp dụng after_value, ts=78)
+  - SITE3 O: 1500 -> 1550 (áp dụng after_value, ts=81)
 
-THAO TÁC UNDO:
+8.3. UNDO OPERATIONS
+....................................
 T12:
-- SITE3 T: rollback 2300 -> 2200 (khôi phục before_value, timestamp=127)
-- SITE2 T: rollback 2200 -> 2100 (khôi phục before_value, timestamp=124)
-- SITE1 T: rollback 2100 -> 2000 (khôi phục before_value, timestamp=121)
+  - SITE3 T: rollback 2300 -> 2200 (khôi phục before_value, ts=127)
+  - SITE2 T: rollback 2200 -> 2100 (khôi phục before_value, ts=124)
+  - SITE1 T: rollback 2100 -> 2000 (khôi phục before_value, ts=121)
 T13:
-- SITE2 V: rollback 2250 -> 2200 (khôi phục before_value, timestamp=135)
-- SITE1 U: rollback 2150 -> 2100 (khôi phục before_value, timestamp=131)
+  - SITE2 V: rollback 2250 -> 2200 (khôi phục before_value, ts=135)
+  - SITE1 U: rollback 2150 -> 2100 (khôi phục before_value, ts=131)
 T2:
-- SITE2 E: rollback 550 -> 500 (khôi phục before_value, timestamp=17)
-- SITE1 D: rollback 450 -> 400 (khôi phục before_value, timestamp=14)
+  - SITE2 E: rollback 550 -> 500 (khôi phục before_value, ts=17)
+  - SITE1 D: rollback 450 -> 400 (khôi phục before_value, ts=14)
 T3:
-- SITE1 F: rollback 650 -> 600 (khôi phục before_value, timestamp=24)
+  - SITE1 F: rollback 650 -> 600 (khôi phục before_value, ts=24)
 T5:
-- SITE1 H: rollback 999 -> 800 (khôi phục before_value, timestamp=44)
+  - SITE1 H: rollback 999 -> 800 (khôi phục before_value, ts=44)
 T7:
-- SITE3 L: rollback 1250 -> 1200 (khôi phục before_value, timestamp=69)
-- SITE1 K: rollback 1150 -> 1100 (khôi phục before_value, timestamp=64)
+  - SITE3 L: rollback 1250 -> 1200 (khôi phục before_value, ts=69)
+  - SITE1 K: rollback 1150 -> 1100 (khôi phục before_value, ts=64)
 T9:
-- SITE2 Q: rollback 1750 -> 1700 (khôi phục before_value, timestamp=91)
-- SITE1 P: rollback 1650 -> 1600 (khôi phục before_value, timestamp=87)
+  - SITE2 Q: rollback 1750 -> 1700 (khôi phục before_value, ts=91)
+  - SITE1 P: rollback 1650 -> 1600 (khôi phục before_value, ts=87)
 
-Giải thích trace:
-- REDO áp dụng after_value theo thứ tự timestamp tăng dần.
-- UNDO khôi phục before_value theo thứ tự timestamp giảm dần.
-- Phần này chứng minh chương trình phục hồi dữ liệu thật, không chỉ phân loại transaction.
+8.4. UNCERTAIN OPERATIONS
+....................................
+Không có transaction UNCERTAIN.
 
-7. Các file được tạo
-- output/clean_db.json
-- output/recovery_report.txt
-- output/clean_logs/
-- output/crash_simulation_report.txt
+9. FILE OUTPUT ĐƯỢC TẠO
+------------------------------------
+- output/recovery_report.txt: báo cáo phục hồi này
+- output/clean_db.json: database sạch sau recovery
+- output/clean_logs/site1_clean.log: clean log của SITE1
+- output/clean_logs/site2_clean.log: clean log của SITE2
+- output/clean_logs/site3_clean.log: clean log của SITE3
+
+10. KẾT LUẬN
+------------------------------------
+Chương trình đã thực hiện post-crash log analysis bằng cách đọc dirty logs của 3 site, phân tích state theo Two-Phase Commit, tách rõ KEEP/REDO/UNDO/UNCERTAIN, phục hồi database và tạo clean logs sau recovery.

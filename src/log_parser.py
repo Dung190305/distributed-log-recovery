@@ -28,6 +28,7 @@ class LogRecord:
     after_value: Optional[int] = None
     raw_line: str = ""
 
+    #tìm các UPDATE
     @property
     def is_update(self) -> bool:
         return self.operation == "UPDATE"
@@ -46,12 +47,14 @@ class LogFormatError(ValueError):
 
 
 class LogParser:
+    #Đọc toàn bộ thư mục logs. Mỗi file log tương ứng với một site. Trả về dict: site_id -> list of LogRecord.
     def parse_directory(self, logs_dir: str | Path) -> Dict[str, List[LogRecord]]:
         logs_path = Path(logs_dir)
         if not logs_path.exists():
             raise FileNotFoundError(f"Logs directory not found: {logs_path}")
 
         site_logs: Dict[str, List[LogRecord]] = {}
+        #Duyệt từng file
         for log_file in sorted(logs_path.glob("*.log")):
             records = self.parse_file(log_file)
             if not records:
@@ -64,6 +67,7 @@ class LogParser:
 
         return site_logs
 
+    #Đọc một file log, trả về list of LogRecord đã được sắp xếp theo timestamp.
     def parse_file(self, log_file: str | Path) -> List[LogRecord]:
         path = Path(log_file)
         if not path.exists():
@@ -80,6 +84,7 @@ class LogParser:
         records.sort(key=lambda r: r.timestamp)
         return records
 
+    #Phân tích một dòng log, trả về LogRecord. Nếu định dạng không hợp lệ, raise LogFormatError với thông tin chi tiết.
     def parse_line(self, line: str, filename: str = "<memory>", line_number: int = 0) -> LogRecord:
         parts = line.split()
         if len(parts) < 5:

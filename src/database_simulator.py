@@ -6,6 +6,7 @@ from pathlib import Path
 
 class DatabaseSimulator:
 
+    #khởi tạo đường dẫn làm việc
     def __init__(self, project_root: str | Path) -> None:
         self.root = Path(project_root)
         self.logs_dir = self.root / "logs"
